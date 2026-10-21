@@ -1,0 +1,52 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - name: Unit tests (OLAP operations)
+        run: pytest -v
+      - name: Build warehouse (1M rows + cube)
+        run: python -m olap.warehouse
+      - name: Build Docker image
+        run: docker build -t olap-duckdb .
+      - name: Smoke test container
+        run: |
+          docker run -d -p 7860:7860 --name app olap-duckdb
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:7860/_stcore/health && exit 0
+            sleep 2
+          done
+          docker logs app; exit 1
+
+  deploy:
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: huggingface
+      url: https://huggingface.co/spaces/${{ vars.HF_SPACE_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install huggingface_hub==2.2.0
+      - name: Deploy to Hugging Face Spaces
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE_ID: ${{ vars.HF_SPACE_ID }}
+          GITHUB_REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: python deploy/deploy_space.py
